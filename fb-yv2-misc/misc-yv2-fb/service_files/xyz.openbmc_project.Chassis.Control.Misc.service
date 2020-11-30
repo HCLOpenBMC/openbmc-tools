@@ -1,0 +1,15 @@
+[Unit]
+Description=Facebook Misc Ipmi Read
+Wants=ipmb.service
+After=ipmb.service
+
+[Service]
+Restart=always
+RestartSec=3
+ExecStart=/usr/bin/fb-yv2-misc
+Type=dbus
+BusName=xyz.openbmc_project.Chassis.Event
+
+[Install]
+WantedBy=sysinit.target
+

@@ -14,8 +14,6 @@
 // limitations under the License.
 */
 
-#include "fb_yv2_misc.hpp"
-
 #include <sys/sysinfo.h>
 #include <nlohmann/json.hpp>
 #include <systemd/sd-journal.h>
@@ -33,6 +31,65 @@
 #include <iterator>
 #include <stdlib.h>
 
+namespace firmwareUpdate
+{
+
+// Max try limit
+static constexpr uint8_t max_retry = 3;
+
+// IANA ID
+static constexpr uint8_t iana_id_0 = 0x15;
+static constexpr uint8_t iana_id_1 = 0xA0;
+static constexpr uint8_t iana_id_2 = 0x00;
+
+// ME recovery cmd
+static constexpr uint8_t bic_intf_me = 0x1;
+static constexpr uint8_t me_recv_cmd_0 = 0xB8;
+static constexpr uint8_t me_recv_cmd_1 = 0xD7;
+static constexpr uint8_t me_recv_cmd_2 = 0x57;
+static constexpr uint8_t me_recv_cmd_3 = 0x01;
+static constexpr uint8_t me_recv_cmd_4 = 0x00;
+
+static constexpr uint8_t verify_me_recv_cmd_0 = 0x18;
+static constexpr uint8_t verify_me_recv_cmd_1 = 0x04;
+static constexpr uint8_t me_recv_cmd = 0x1;
+
+// BIOS SIZE
+static constexpr uint32_t bios_64k_size = (64*1024);
+static constexpr uint32_t bios_32k_size = (32*1024);
+
+// Command Id
+static constexpr uint8_t me_recv_id = 0x2;
+static constexpr uint8_t get_fw_chksum_id = 0xA;
+static constexpr uint8_t firmware_update_id = 0x9;
+static constexpr uint8_t get_cpld_update_progress = 0x1A;
+
+// Error Codes
+static constexpr uint8_t write_flash_err   = 0x80;
+static constexpr uint8_t power_sts_chk_err = 0x81;
+static constexpr uint8_t data_len_err      = 0x82;
+static constexpr uint8_t flash_erase_err   = 0x83;
+static constexpr uint8_t cpld_err_code     = 0xFD;
+static constexpr uint8_t me_recv_err_0     = 0x81;
+static constexpr uint8_t me_recv_err_1     = 0x2;
+
+// General declarations
+static constexpr uint8_t resp_size = 6;
+static constexpr uint8_t net_fn = 0x38;
+static constexpr uint8_t ipmb_write_128b = 128;
+
+// Host Numbers
+static constexpr uint8_t host1 = 0;
+static constexpr uint8_t host2 = 1;
+static constexpr uint8_t host3 = 2;
+static constexpr uint8_t host4 = 3;
+
+static constexpr uint8_t update_bios= 0;
+static constexpr uint8_t update_cpld= 1;
+static constexpr uint8_t update_bic_bootloader= 2;
+static constexpr uint8_t update_bic= 3;
+static constexpr uint8_t update_vr= 4;
+
 std::shared_ptr<sdbusplus::asio::connection> conn;
 static boost::asio::io_service io;
 static constexpr uint8_t lun = 0;
@@ -43,14 +100,14 @@ using respType =
 
 void print_help()
 {
-    std::cerr << "The input format should be like below\n";
-    std::cerr << "<file_name> <bin_file_path> <host1/2/3/4> <--update> <bios/cpld/bridgeIC/VR>\n";
+    phosphor::logging::log<phosphor::logging::level::ERR>(
+    "Usage: <file_name> <bin_file_path> <host1/2/3/4> <--update> <bios/cpld/bridgeIC/VR>");
 }
 
 
 /*
 Function Name    : sendIPMBRequest
-Description      : Send data to target through Ipmb
+Description      : Send data to target through IPMB
 */
 int sendIPMBRequest(uint8_t host, uint8_t netFn, uint8_t cmd,
                     std::vector<uint8_t> &cmdData,
@@ -92,55 +149,59 @@ int sendFirmwareUpdateData(uint8_t slotId, std::vector<uint8_t> &sendData,
                            uint32_t offset, uint8_t target)
 {
     // Vector declaration
-    std::vector<uint8_t> cmdData{IANA_ID_0, IANA_ID_1, IANA_ID_2};
+    std::vector<uint8_t> cmdData{iana_id_0, iana_id_1, iana_id_2};
     std::vector<uint8_t> respData;
 
     // Variable declaration
-    int ret = 0;
+    int retries = max_retry;
     uint8_t len_byte[2];
     uint8_t offset_byte[4];
     *(uint32_t *)&offset_byte = offset;
     *(uint16_t *)&len_byte = sendData.size();
-    int retries = MAX_RETRY;
 
-    // Frame the send vector data
+    // Frame the Firmware send IPMB data
     cmdData.push_back(target);
     cmdData.insert(cmdData.end(), offset_byte, offset_byte + sizeof(offset_byte));
     cmdData.insert(cmdData.end(), len_byte, len_byte + sizeof(len_byte));
     cmdData.insert(cmdData.end(), sendData.begin(), sendData.end());
 
-    std::cerr << "sendFirmwareUpdateData started\n";
     while (retries != 0)
     {
-        sendIPMBRequest(slotId, NET_FN, FIRMWARE_UPDATE_ID, cmdData, respData);
-        uint8_t retStatus = respData[0];
-
-        if ((retStatus == 0) && (respData[1] == IANA_ID_0)){
-            break;
-        } else if (retStatus == WRITE_FLASH_ERR) {
-            std::cerr << "Write Flash Error!!";
-        } else if (retStatus == POWER_STS_CHK_ERR) {
-            std::cerr << "Power status check Fail!!";
-        } else if (retStatus == DATA_LEN_ERR) {
-            std::cerr << "Data length Error!!";
-        } else if (retStatus == FLASH_ERASE_ERR) {
-            std::cerr << "Flash Erase Error!!";
-        } else {
-            std::cerr << "Invalid Data...";
+        int ret = sendIPMBRequest(slotId, net_fn, firmware_update_id, cmdData, respData);
+        if (ret)
+        {
+            return -1;
         }
-        sleep(0.001);
-        std::cerr << " slot:" << slotId << " Offset:" << offset
-                  << " len:" << sendData.size() << "Retrying.....\n";
+        if ((respData[0] == 0) && (respData[1] == iana_id_0)){
+            break;
+        } else if (respData[0] == write_flash_err) {
+            phosphor::logging::log<phosphor::logging::level::ERR>(
+            "Write Flash Error!!");
+        } else if (respData[0] == power_sts_chk_err) {
+            phosphor::logging::log<phosphor::logging::level::ERR>(
+            "Power status check Fail!!");
+        } else if (respData[0] == data_len_err) {
+            phosphor::logging::log<phosphor::logging::level::ERR>(
+            "Data length Error!!");
+        } else if (respData[0] == flash_erase_err) {
+            phosphor::logging::log<phosphor::logging::level::ERR>(
+            "Flash Erase Error!!");
+        } else {
+            phosphor::logging::log<phosphor::logging::level::ERR>(
+            "Invalid Data...");
+        }
+        std::string logMsg = "slot:" + +slotId + " Offset:" + offset + " len:" + sendData.size() + " Retrying..";
+        phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
         retries--;
     }
 
     if (retries == 0)
     {
-        std::cerr << "Error!!! Not able to send bios data!!! \n";
+        phosphor::logging::log<phosphor::logging::level::ERR>(
+        "Error!!! Not able to send bios data!!!");
         return -1;
     }
-    std::cerr << "sendFirmwareUpdateData Done\n";
-  return 0;
+    return 0;
 }
 
 
@@ -151,34 +212,35 @@ Description      : Get the checksum value of bios image
 int getChksumFW(uint8_t slotId, uint32_t offset, uint32_t len,
                 std::vector<uint8_t> &respData, uint8_t target)
 {
-    // Declaration
-    std::vector<uint8_t> cmdData{IANA_ID_0, IANA_ID_1, IANA_ID_2};
-    int retries = MAX_RETRY;
+    // Variable declaration
+    std::vector<uint8_t> cmdData{iana_id_0, iana_id_1, iana_id_2};
+    int retries = max_retry;
     uint8_t len_byte[4];
     uint8_t offset_byte[4];
     *(uint32_t *)&offset_byte = offset;
     *(uint32_t *)&len_byte = len;
 
-    // Frame the send vector data
+    // Frame the IPMB request data
     cmdData.push_back(target);
     cmdData.insert(cmdData.end(), offset_byte, offset_byte + sizeof(offset_byte));
     cmdData.insert(cmdData.end(), len_byte, len_byte + sizeof(len_byte));
 
-    while (retries != 0)
+    while (retries > 0)
     {
-        sendIPMBRequest(slotId, NET_FN, GET_FW_CHK_SUM, cmdData, respData);
-        if (respData.size() != RESP_SIZE)
+        sendIPMBRequest(slotId, net_fn, get_fw_chksum_id, cmdData, respData);
+        if (respData.size() != resp_size)
         {
-            sleep(0.001);
-            std::cerr << "Checksum not obtained properly for slot:" << slotId
-                << " Offset:" << offset << " len:" << len << "Retrying.....\n";
+            std::string logMsg = "Checksum values not obtained properly for slot: " + 
+               slotId + " Offset:" + offset + " len:" + len + " Retrying... ;
+            phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
             retries--;
         }
     }
 
     if (retries == 0)
     {
-        std::cerr << "Failed to get the Checksum value from firmware.. \n";
+        phosphor::logging::log<phosphor::logging::level::ERR>(
+        "Failed to get the Checksum value from firmware..");
         return -1;
     }
     return 0;
@@ -191,67 +253,72 @@ Description      : Set Me to recovery mode
 */
 int meRecovery(uint8_t slotId, uint8_t mode)
 {
-    // Declarations
-    std::vector<uint8_t> cmdData{IANA_ID_0, IANA_ID_1,
-	                             IANA_ID_2, BIC_INTF_ME};
+    // Variable declarations
+    std::vector<uint8_t> cmdData{iana_id_0, iana_id_1,
+	                             iana_id_2, bic_intf_me};
     std::vector<uint8_t> respData;
-    int retries = MAX_RETRY;
-    uint8_t me_recovery_cmd[] = {ME_RECOVERY_CMD_0,
-	                             ME_RECOVERY_CMD_1,
-                                 ME_RECOVERY_CMD_2,
-								 ME_RECOVERY_CMD_3,
-                                 ME_RECOVERY_CMD_4};
+    int retries = max_retry;
+    uint8_t me_recovery_cmd[] = {me_recv_cmd_0,
+	                             me_recv_cmd_1,
+                                 me_recv_cmd_2,
+								 me_recv_cmd_3,
+                                 me_recv_cmd_4};
 
-    // Frame the send vector data
+    // Frame the IPMB send request data for ME recovery
     cmdData.insert(cmdData.end(), me_recovery_cmd,
                    me_recovery_cmd + sizeof(me_recovery_cmd));
     cmdData.push_back(mode);
 
-    std::cerr << "Starting ME recovery mode\n";
-    while (retries != 0)
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+    "Setting ME to recovery mode");
+    while (retries > 0)
     {
-        sendIPMBRequest(slotId, NET_FN, ME_RECOVERY_ID, cmdData, respData);
-        if (respData.size() != RESP_SIZE) {
-            std::cerr << "ME is not set into recovery mode.. Retrying... \n";
+        sendIPMBRequest(slotId, net_fn, me_recv_id, cmdData, respData);
+        if (respData.size() != resp_size) {
+            phosphor::logging::log<phosphor::logging::level::ERR>(
+            "ME is not set into recovery mode.. Retrying...");
         } else if (respData[3] != cmdData[3]) {
-            std::cerr << "Interface not valid.. Retrying...  \n";
+            phosphor::logging::log<phosphor::logging::level::ERR>(
+            "Interface not valid.. Retrying...");
         } else if (respData[0] == 0) {
-            std::cerr << "ME recovery mode -> Completion Status set.. \n";
+            phosphor::logging::log<phosphor::logging::level::ERR>(
+            "ME recovery mode -> Completion Status set..");
             break;
         } else if (respData[0] != 0) {
-            std::cerr << "ME recovery mode -> Completion Status not set.. Retrying..\n";
+            phosphor::logging::log<phosphor::logging::level::ERR>(
+            "ME recovery mode -> Completion Status not set.. Retrying..");
         } else {
-            sleep(0.001);
-            std::cerr << "Invalid data or command... \n";
+            phosphor::logging::log<phosphor::logging::level::ERR>(
+            "Invalid data or command...");
         }
-        sleep(0.001);
         retries--;
     }
 
     if (retries == 0)
     {
-        std::cerr << "Failed to set ME to recovery mode.. \n";
+        phosphor::logging::log<phosphor::logging::level::ERR>(
+        "Failed to set ME to recovery mode..");
         return -1;
     }
 
     // Verify whether ME went to recovery mode
-    std::vector<uint8_t> meData{IANA_ID_0,
-                                IANA_ID_1,
-                                IANA_ID_2,
-                                BIC_INTF_ME,
-                                VERIFY_ME_RECV_CMD_0,
-                                VERIFY_ME_RECV_CMD_1};
+    std::vector<uint8_t> meData{iana_id_0,
+                                iana_id_1,
+                                iana_id_2,
+                                bic_intf_me,
+                                verify_me_recv_cmd_0,
+                                verify_me_recv_cmd_1};
     std::vector<uint8_t> meResp;
-    retries = MAX_RETRY;
+    retries = max_retry;
 
     while (retries != 0)
     {
-        sendIPMBRequest(slotId, NET_FN, ME_RECOVERY_ID, meData, meResp);
+        sendIPMBRequest(slotId, net_fn, me_recv_id, meData, meResp);
         if (meResp[3] != meData[3])
         {
-            sleep(0.001);
-            std::cerr << "Interface not valid.. Retrying...  \n";
-        } else if ((mode == 0x1) && (meResp[1] == 0x81) && (meResp[2] == 0x02))
+            phosphor::logging::log<phosphor::logging::level::ERR>(
+            "Interface not valid.. Retrying...");
+        } else if ((mode == me_recv_id) && (meResp[1] == me_recv_err_0) && (meResp[2] == me_recv_err_1))
         {
             return 0;
         }
@@ -260,39 +327,40 @@ int meRecovery(uint8_t slotId, uint8_t mode)
 
     if (retries == 0)
     {
-        std::cerr << "Failed to set ME to recovery mode in self tests.. \n";
+        phosphor::logging::log<phosphor::logging::level::ERR>(
+        "Failed to set ME to recovery mode in self tests..");
         return -1;
     }
-    std::cerr << "ME is set to recovery mode\n";
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+                  "ME is set to recovery mode");
     return 0;
 }
 
 
 int getCpldUpdateProgress(uint8_t slotId, std::vector<uint8_t> &respData)
 {
-    // Declarations
-    std::vector<uint8_t> cmdData{IANA_ID_0, IANA_ID_1, IANA_ID_2};
+    // Variable declarations
+    std::vector<uint8_t> cmdData{iana_id_0, iana_id_1, iana_id_2};
     int ret;
     int retries = 0;
 
-    while (retries != MAX_RETRY)
+    while (retries > max_retry)
     {
-        ret = sendIPMBRequest(slotId, NET_FN, GET_CPLD_UPDATE_PROGRESS, cmdData, respData);
+        ret = sendIPMBRequest(slotId, net_fn, get_cpld_update_progress, cmdData, respData);
         if (ret)
         {
-            sleep(0.001);
-            std::cerr << "getCpldUpdateProgress: slot: " << +slotId
-                      << ", retrying..\n";
+            std::string logMsg = "getCpldUpdateProgress: slot: " + slotId + ", retrying..";
+            phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
             retries++;
-        } else
-        {
+        } else {
             break;
         }
     }
 
-    if (retries == MAX_RETRY)
+    if (retries == max_retry)
     {
-        std::cerr << "Failed to set response.. \n";
+        phosphor::logging::log<phosphor::logging::level::ERR>(
+        "Failed to set response.. \n");
         return -1;
     }
     return 0;
@@ -302,71 +370,71 @@ int getCpldUpdateProgress(uint8_t slotId, std::vector<uint8_t> &respData)
 int biosVerifyImage(const char *imagePath, uint8_t slotId, uint8_t target)
 {
     // Check for bios image
-    uint32_t offset_d = 0;
-    uint32_t biosVerifyPktSize = BIOS_32k_SIZE;
+    uint32_t offset = 0;
+    uint32_t biosVerifyPktSize = bios_32k_size;
 
-    std::cerr << "Verify Bios image...\n";
+    phosphor::logging::log<phosphor::logging::level::INFO>("Verify Bios image..");
 
     // Open the file
     std::streampos fileSize;
     std::ifstream file(imagePath,
-                       std::ios::in | std::ios::binary | std::ios::ate);
+                       std::ios::in | std::ios::binary);
 
-    if (file.is_open())
+    if (!file.is_open())
     {
-        file.seekg(0, std::ios::beg);
-
-        std::cerr << "Starting Bios image verification\n";
-        while (offset_d < fileSize)
-        {
-            // Read the data
-            std::vector<int> chksum(biosVerifyPktSize);
-            file.read((char *)&chksum[0], biosVerifyPktSize);
-
-            // Calculate checksum
-            uint32_t tcksum = 0;
-            for (int i = 0; i < chksum.size(); i++)
-            {
-                tcksum += chksum[i];
-            }
-
-            std::vector<std::uint8_t> calChksum((std::uint8_t *)&tcksum,
-                                                (std::uint8_t *)&(tcksum) +
-                                                 sizeof(std::uint32_t));
-
-           // Get the checksum value from firmware
-           uint8_t retValue;
-           std::vector<uint8_t> fwChksumData;
-
-           retValue = getChksumFW(slotId, offset_d, biosVerifyPktSize, fwChksumData, target);
-           if (retValue != 0)
-           {
-               std::cerr << "Failed to get the Checksum value!! \n";
-               return -1;
-           }
-
-           for (uint8_t i = 0; i <= calChksum.size(); i++)
-           {
-               // Compare both and see if they match or not
-               if (fwChksumData[i] != calChksum[i])
-               {
-                   std::cerr << "checksum does not match, offset:" << offset_d
-                             << " Calculated chksum:" << +calChksum[i]
-                             << " FW Chksum:" << +fwChksumData[i] << "\n";
-                   return -1;
-               } else {
-                   std::cerr << "checksum match, offset:" << offset_d
-                             << " Calculated chksum:" << +calChksum[i]
-                             << " FW Chksum:" << +fwChksumData[i] << "\n";
-               }
-           }
-           offset_d += biosVerifyPktSize;
-        }
-        std::cerr << "Bios image verification done..\n";
-        file.close();
-    } else {
-    std::cerr << "Unable to open file";
+        phosphor::logging::log<phosphor::logging::level::ERR>(
+        "Unable to open file");
+        return -1;
     }
+    file.seekg(0, std::ios::beg);
+
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+    "Starting Bios image verification");
+    while (offset < fileSize)
+    {
+        // Read the data
+        std::vector<int> chksum(biosVerifyPktSize);
+        file.read((char *)&chksum[0], biosVerifyPktSize);
+
+        // Calculate checksum
+        uint32_t tcksum = 0;
+        for (int byte_index = 0; byte_index < chksum.size(); byte_index++)
+        {
+            tcksum += chksum[byte_index];
+        }
+
+        std::vector<std::uint8_t> calChksum((std::uint8_t *)&tcksum,
+                                            (std::uint8_t *)&(tcksum) +
+                                             sizeof(std::uint32_t));
+
+       // Get the checksum value from firmware
+       uint8_t retValue;
+       std::vector<uint8_t> fwChksumData;
+
+       retValue = getChksumFW(slotId, offset, biosVerifyPktSize, fwChksumData, target);
+       if (retValue != 0)
+       {
+           phosphor::logging::log<phosphor::logging::level::ERR>(
+           "Failed to get the Checksum value!!");
+           return -1;
+       }
+
+       for (uint8_t ind = 0; ind <= calChksum.size(); ind++)
+       {
+           // Compare both and see if they match or not
+           if (fwChksumData[ind] != calChksum[ind])
+           {
+               std::string logMsg = "Checksum Failed! Offset: " + offset +
+                         " Expected: " + calChksum[ind] + " Actual: " + fwChksumData[ind]; 
+               phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
+               return -1;
+           } 
+       }
+       offset += biosVerifyPktSize;
+    }
+    phosphor::logging::log<phosphor::logging::level::ERR>(
+    "Bios image verification done..");
+    file.close();
     return 0;
 }
 
@@ -380,16 +448,17 @@ Param: target: cmd Id to find the target (BIOS, CPLD, VR, ME)
 */
 int updateFirmwareTarget(uint8_t slotId, const char *imagePath, uint8_t target)
 {
-    // Read the binary data from bin file
+    // Variable Declartion
     int count = 0x0;
     uint32_t offset = 0x0;
-    uint32_t ipmbWriteMax  = IPMB_WRITE_128B;
+    uint32_t ipmbWriteMax  = ipmb_write_128b;
 
     // Set ME to recovery mode
-    int ret_val = meRecovery(slotId, ME_RECOVERY_MODE);
+    int ret_val = meRecovery(slotId, me_recv_cmd);
     if (ret_val != 0)
     {
-        std::cerr << "Me set to recovery mode failed\n";
+        phosphor::logging::log<phosphor::logging::level::ERR>(
+        "Me set to recovery mode failed");
         return -1;
     }
 
@@ -398,56 +467,65 @@ int updateFirmwareTarget(uint8_t slotId, const char *imagePath, uint8_t target)
     std::ifstream file(imagePath,
                        std::ios::in | std::ios::binary | std::ios::ate);
 
-    if (file.is_open())
+    if (!file.is_open())
     {
-        // Get its size
-        fileSize = file.tellg();
-        std::cerr << "Total Filesize " << fileSize << "\n";
-
-        // Check whether the image is valid
-        if (fileSize <= 0)
-        {
-            std::cerr << "Invalid bin File\n";
-            return -1;
-        } else {
-            std::cerr << "Valid bin File\n";
-        }
-        file.seekg(0, std::ios::beg);
-        int i = 1;
-
-        while (offset < fileSize)
-        {
-
-            // count details
-            uint32_t count = ipmbWriteMax;
-
-            if ((offset + ipmbWriteMax) >= (i * BIOS_64k_SIZE))
-            {
-                count = (i * BIOS_64k_SIZE) - offset;
-                i++;
-            }
-
-            // Read the data
-            std::vector<uint8_t> fileData(ipmbWriteMax);
-            file.read((char *)&fileData[0], ipmbWriteMax);
-
-            // Send data
-            int ret = sendFirmwareUpdateData(slotId, fileData, offset, target);
-            if (ret != 0)
-            {
-                std::cerr << "Firmware update Failed at offset " << offset << "\n";
-                return -1;
-            }
-
-            // Update counter
-            offset += count;
-        }
-        file.close();
-    } else {
-    std::cerr << "Unable to open file";
+        phosphor::logging::log<phosphor::logging::level::ERR>(
+        "Unable to open file");
     }
+   
+    // Get its size
+    fileSize = file.tellg();
+    std::string logMsg = "Bin File Size: " + fileSize; 
+    phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
 
-    if (target == UPDATE_BIOS)
+    // Check whether the image is valid
+    if (fileSize <= 0)
+    {
+        phosphor::logging::log<phosphor::logging::level::ERR>(
+        "Invalid bin File");
+        return -1;
+    } else {
+        phosphor::logging::log<phosphor::logging::level::INFO>(
+        "Valid bin File");
+    }
+    file.seekg(0, std::ios::beg);
+    int index = 1;
+
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+    "Firmware write started");
+    while (offset < fileSize)
+    {
+
+        // count details
+        uint32_t count = ipmbWriteMax;
+
+        if ((offset + ipmbWriteMax) >= (index * bios_64k_size))
+        {
+            count = (index * bios_64k_size) - offset;
+            index++;
+        }
+
+        // Read the data
+        std::vector<uint8_t> fileData(ipmbWriteMax);
+        file.read((char *)&fileData[0], ipmbWriteMax);
+
+        // Send data
+        int ret = sendFirmwareUpdateData(slotId, fileData, offset, target);
+        if (ret != 0)
+        {
+            std::string logMsg = "Firmware update Failed at offset: " + offset; 
+            phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
+            return -1;
+        }
+
+        // Update counter
+        offset += count;
+    }
+    phosphor::logging::log<phosphor::logging::level::INFO>(
+    "Firmware write Done");
+    file.close();
+
+    if (target == update_bios)
     {
         int ret = biosVerifyImage(imagePath, slotId, target);
         if (ret) {
@@ -455,7 +533,7 @@ int updateFirmwareTarget(uint8_t slotId, const char *imagePath, uint8_t target)
         }
     }
 
-    if (target == UPDATE_CPLD)
+    if (target == update_cpld)
     {
         std::vector<uint8_t> respData;
 
@@ -467,7 +545,7 @@ int updateFirmwareTarget(uint8_t slotId, const char *imagePath, uint8_t target)
                 return -1;
             }
 
-            if (respData[4] == CPLD_ERR_CODE) {
+            if (respData[4] == cpld_err_code) {
                 return -1;
             }
 
@@ -484,28 +562,30 @@ int updateFirmwareTarget(uint8_t slotId, const char *imagePath, uint8_t target)
 
 int cpldUpdateFw(uint8_t slotId, const char *imagePath)
 {
-    int ret = updateFirmwareTarget(slotId, imagePath, UPDATE_CPLD);
+    int ret = updateFirmwareTarget(slotId, imagePath, update_cpld);
     if (ret != 0)
     {
-        std::cerr << "CPLD update failed for slot #" << +slotId << "\n";
+        std::string logMsg = "CPLD update failed for slot#" + slotId; 
+        phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
         return -1;
     }
-    std::cerr << "CPLD update completed successfully for slot#"
-              << +slotId << "\n";
+    std::string logMsg = "CPLD update completed successfully for slot#" + slotId; 
+    phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
     return 0;
 }
 
 
 int hostBiosUpdateFw(uint8_t slotId, const char *imagePath)
 {
-    int ret = updateFirmwareTarget(slotId, imagePath, UPDATE_BIOS);
+    int ret = updateFirmwareTarget(slotId, imagePath, update_bios);
     if (ret != 0)
     {
-        std::cerr << "BIOS update failed for slot #" << +slotId << "\n";
+        std::string logMsg = "BIOS update failed for slot#" + slotId; 
+        phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
         return -1;
     }
-    std::cerr << "BIOS update completed successfully for slot#"
-              << +slotId << "\n";
+    std::string logMsg = "BIOS update completed successfully for slot#" + slotId; 
+    phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
     return 0;
 }
 
@@ -521,7 +601,6 @@ int updateFw(char *argv[], uint8_t slotId)
             int ret = hostBiosUpdateFw(slotId, binFile);
             if (ret != 0)
             {
-                std::cerr << "BIOS update failed for slot #" << +slotId << "\n";
                 return -1;
             }
 
@@ -529,12 +608,12 @@ int updateFw(char *argv[], uint8_t slotId)
             int ret = cpldUpdateFw(slotId, binFile);
             if (ret != 0)
             {
-                std::cerr << "CPLD update failed for slot #" << +slotId << "\n";
                 return -1;
             }
 
         } else {
-            std::cerr << "Invalid Update command\n";
+            phosphor::logging::log<phosphor::logging::level::ERR>(
+            "Invalid Update command");
             print_help();
             return -1;
         }
@@ -542,40 +621,42 @@ int updateFw(char *argv[], uint8_t slotId)
     return 0;
 }
 
+}// namespace
 
 int main(int argc, char *argv[])
 {
     // command -> fb_yv2_misc binfile host1 --update bios/cpld
 
-    conn = std::make_shared<sdbusplus::asio::connection>(io);
+    firmwareUpdate::conn = std::make_shared<sdbusplus::asio::connection>(firmwareUpdate::io);
     // Get the arguments
     uint8_t slotId;
 
     // Check for the host name
     if(strcmp(argv[2], "host1") == 0) {
-        slotId = HOST_1;
+        slotId = firmwareUpdate::host1;
     } else if (strcmp(argv[2], "host2") == 0) {
-        slotId = HOST_2;
+        slotId = firmwareUpdate::host2;
     } else if (strcmp(argv[2], "host3") == 0) {
-        slotId = HOST_3;
+        slotId = firmwareUpdate::host3;
     } else if (strcmp(argv[2], "host4") == 0) {
-        slotId = HOST_4;
+        slotId = firmwareUpdate::host4;
     } else {
-        std::cerr << "Invalid host number\n";
-        print_help();
+        phosphor::logging::log<phosphor::logging::level::ERR>(
+        "Invalid host number");
+        firmwareUpdate::print_help();
         return -1;
     }
 
     // Update the FW
-    int ret = updateFw(argv, slotId);
+    int ret = firmwareUpdate::updateFw(argv, slotId);
     if (ret != 0)
     {
-        std::cerr << "FW update failed for slot #" << +slotId << "\n";
+        std::string logMsg = "FW update failed for slot#" + slotId; 
+        phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
         return -1;
     }
-    std::cerr << "FW update completed successfully for slot#"
-              << +slotId << "\n";
-
+    std::string logMsg = "FW update completed successfully for slot#" + slotId; 
+    phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
     return 0;
 }
 

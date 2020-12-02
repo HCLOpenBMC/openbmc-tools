@@ -190,7 +190,7 @@ int sendFirmwareUpdateData(uint8_t slotId, std::vector<uint8_t> &sendData,
             phosphor::logging::log<phosphor::logging::level::ERR>(
             "Invalid Data...");
         }
-        std::string logMsg = "slot:" + +slotId + " Offset:" + offset + " len:" + sendData.size() + " Retrying..";
+        std::string logMsg = "slot:" + std::to_string(slotId) + " Offset:" + std::to_string(offset) + " len:" + std::to_string(sendData.size()) + " Retrying..";
         phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
         retries--;
     }
@@ -230,8 +230,8 @@ int getChksumFW(uint8_t slotId, uint32_t offset, uint32_t len,
         sendIPMBRequest(slotId, net_fn, get_fw_chksum_id, cmdData, respData);
         if (respData.size() != resp_size)
         {
-            std::string logMsg = "Checksum values not obtained properly for slot: " + 
-               slotId + " Offset:" + offset + " len:" + len + " Retrying... ;
+            std::string logMsg = "Checksum values not obtained properly for slot: " +
+               std::to_string(slotId) + " Offset:" + std::to_string(offset) + " len:" + std::to_string(len) + " Retrying..." ;
             phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
             retries--;
         }
@@ -349,7 +349,7 @@ int getCpldUpdateProgress(uint8_t slotId, std::vector<uint8_t> &respData)
         ret = sendIPMBRequest(slotId, net_fn, get_cpld_update_progress, cmdData, respData);
         if (ret)
         {
-            std::string logMsg = "getCpldUpdateProgress: slot: " + slotId + ", retrying..";
+            std::string logMsg = "getCpldUpdateProgress: slot: " + std::to_string(slotId) + ", retrying..";
             phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
             retries++;
         } else {
@@ -424,11 +424,11 @@ int biosVerifyImage(const char *imagePath, uint8_t slotId, uint8_t target)
            // Compare both and see if they match or not
            if (fwChksumData[ind] != calChksum[ind])
            {
-               std::string logMsg = "Checksum Failed! Offset: " + offset +
-                         " Expected: " + calChksum[ind] + " Actual: " + fwChksumData[ind]; 
+               std::string logMsg = "Checksum Failed! Offset: " + std::to_string(offset) +
+                         " Expected: " + std::to_string(calChksum[ind]) + " Actual: " + std::to_string(fwChksumData[ind]);
                phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
                return -1;
-           } 
+           }
        }
        offset += biosVerifyPktSize;
     }
@@ -472,10 +472,10 @@ int updateFirmwareTarget(uint8_t slotId, const char *imagePath, uint8_t target)
         phosphor::logging::log<phosphor::logging::level::ERR>(
         "Unable to open file");
     }
-   
+
     // Get its size
     fileSize = file.tellg();
-    std::string logMsg = "Bin File Size: " + fileSize; 
+    std::string logMsg = "Bin File Size: " + std::to_string(fileSize);
     phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
 
     // Check whether the image is valid
@@ -513,7 +513,7 @@ int updateFirmwareTarget(uint8_t slotId, const char *imagePath, uint8_t target)
         int ret = sendFirmwareUpdateData(slotId, fileData, offset, target);
         if (ret != 0)
         {
-            std::string logMsg = "Firmware update Failed at offset: " + offset; 
+            std::string logMsg = "Firmware update Failed at offset: " + std::to_string(offset);
             phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
             return -1;
         }
@@ -565,11 +565,11 @@ int cpldUpdateFw(uint8_t slotId, const char *imagePath)
     int ret = updateFirmwareTarget(slotId, imagePath, update_cpld);
     if (ret != 0)
     {
-        std::string logMsg = "CPLD update failed for slot#" + slotId; 
+        std::string logMsg = "CPLD update failed for slot#" + std::to_string(slotId);
         phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
         return -1;
     }
-    std::string logMsg = "CPLD update completed successfully for slot#" + slotId; 
+    std::string logMsg = "CPLD update completed successfully for slot#" + std::to_string(slotId);
     phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
     return 0;
 }
@@ -580,11 +580,11 @@ int hostBiosUpdateFw(uint8_t slotId, const char *imagePath)
     int ret = updateFirmwareTarget(slotId, imagePath, update_bios);
     if (ret != 0)
     {
-        std::string logMsg = "BIOS update failed for slot#" + slotId; 
+        std::string logMsg = "BIOS update failed for slot#" + std::to_string(slotId);
         phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
         return -1;
     }
-    std::string logMsg = "BIOS update completed successfully for slot#" + slotId; 
+    std::string logMsg = "BIOS update completed successfully for slot#" + std::to_string(slotId);
     phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
     return 0;
 }
@@ -651,11 +651,11 @@ int main(int argc, char *argv[])
     int ret = firmwareUpdate::updateFw(argv, slotId);
     if (ret != 0)
     {
-        std::string logMsg = "FW update failed for slot#" + slotId; 
+        std::string logMsg = "FW update failed for slot#" + std::to_string(slotId);
         phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
         return -1;
     }
-    std::string logMsg = "FW update completed successfully for slot#" + slotId; 
+    std::string logMsg = "FW update completed successfully for slot#" + std::to_string(slotId);
     phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
     return 0;
 }

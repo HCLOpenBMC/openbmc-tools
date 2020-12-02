@@ -34,7 +34,7 @@
 namespace firmwareUpdate
 {
 
-// Max try limit
+// Max retry limit
 static constexpr uint8_t max_retry = 3;
 
 // IANA ID
@@ -101,7 +101,7 @@ using respType =
 void print_help()
 {
     phosphor::logging::log<phosphor::logging::level::ERR>(
-    "Usage: <file_name> <bin_file_path> <host1/2/3/4> <--update> <bios/cpld/bridgeIC/VR>");
+    "Usage: <file_name> <bin_file_path> <host1/2/3/4> <--update> <bios/cpld/bic/bicbtl/vr>");
 }
 
 
@@ -167,11 +167,13 @@ int sendFirmwareUpdateData(uint8_t slotId, std::vector<uint8_t> &sendData,
 
     while (retries != 0)
     {
-        int ret = sendIPMBRequest(slotId, net_fn, firmware_update_id, cmdData, respData);
+        int ret = sendIPMBRequest(slotId, net_fn, firmware_update_id,
+                                  cmdData, respData);
         if (ret)
         {
             return -1;
         }
+        // Check the completion code and the IANA_ID (0x15) for success
         if ((respData[0] == 0) && (respData[1] == iana_id_0)){
             break;
         } else if (respData[0] == write_flash_err) {
@@ -190,7 +192,9 @@ int sendFirmwareUpdateData(uint8_t slotId, std::vector<uint8_t> &sendData,
             phosphor::logging::log<phosphor::logging::level::ERR>(
             "Invalid Data...");
         }
-        std::string logMsg = "slot:" + std::to_string(slotId) + " Offset:" + std::to_string(offset) + " len:" + std::to_string(sendData.size()) + " Retrying..";
+        std::string logMsg = "slot:" + std::to_string(slotId) + " Offset:" +
+            std::to_string(offset) + " len:" + std::to_string(sendData.size()) +
+            " Retrying..";
         phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
         retries--;
     }
@@ -231,7 +235,8 @@ int getChksumFW(uint8_t slotId, uint32_t offset, uint32_t len,
         if (respData.size() != resp_size)
         {
             std::string logMsg = "Checksum values not obtained properly for slot: " +
-               std::to_string(slotId) + " Offset:" + std::to_string(offset) + " len:" + std::to_string(len) + " Retrying..." ;
+               std::to_string(slotId) + " Offset:" + std::to_string(offset)
+               + " len:" + std::to_string(len) + " Retrying..." ;
             phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
             retries--;
         }
@@ -255,13 +260,13 @@ int meRecovery(uint8_t slotId, uint8_t mode)
 {
     // Variable declarations
     std::vector<uint8_t> cmdData{iana_id_0, iana_id_1,
-	                             iana_id_2, bic_intf_me};
+                                 iana_id_2, bic_intf_me};
     std::vector<uint8_t> respData;
     int retries = max_retry;
     uint8_t me_recovery_cmd[] = {me_recv_cmd_0,
-	                             me_recv_cmd_1,
+                                 me_recv_cmd_1,
                                  me_recv_cmd_2,
-								 me_recv_cmd_3,
+                                 me_recv_cmd_3,
                                  me_recv_cmd_4};
 
     // Frame the IPMB send request data for ME recovery
@@ -318,7 +323,8 @@ int meRecovery(uint8_t slotId, uint8_t mode)
         {
             phosphor::logging::log<phosphor::logging::level::ERR>(
             "Interface not valid.. Retrying...");
-        } else if ((mode == me_recv_id) && (meResp[1] == me_recv_err_0) && (meResp[2] == me_recv_err_1))
+        } else if ((mode == me_recv_id) && (meResp[1] == me_recv_err_0) &&
+                                           (meResp[2] == me_recv_err_1))
         {
             return 0;
         }
@@ -346,10 +352,12 @@ int getCpldUpdateProgress(uint8_t slotId, std::vector<uint8_t> &respData)
 
     while (retries > max_retry)
     {
-        ret = sendIPMBRequest(slotId, net_fn, get_cpld_update_progress, cmdData, respData);
+        ret = sendIPMBRequest(slotId, net_fn, get_cpld_update_progress,
+                              cmdData, respData);
         if (ret)
         {
-            std::string logMsg = "getCpldUpdateProgress: slot: " + std::to_string(slotId) + ", retrying..";
+            std::string logMsg = "getCpldUpdateProgress: slot: " +
+                std::to_string(slotId) + ", retrying..";
             phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
             retries++;
         } else {
@@ -411,7 +419,8 @@ int biosVerifyImage(const char *imagePath, uint8_t slotId, uint8_t target)
        uint8_t retValue;
        std::vector<uint8_t> fwChksumData;
 
-       retValue = getChksumFW(slotId, offset, biosVerifyPktSize, fwChksumData, target);
+       retValue = getChksumFW(slotId, offset, biosVerifyPktSize,
+                              fwChksumData, target);
        if (retValue != 0)
        {
            phosphor::logging::log<phosphor::logging::level::ERR>(
@@ -424,8 +433,10 @@ int biosVerifyImage(const char *imagePath, uint8_t slotId, uint8_t target)
            // Compare both and see if they match or not
            if (fwChksumData[ind] != calChksum[ind])
            {
-               std::string logMsg = "Checksum Failed! Offset: " + std::to_string(offset) +
-                         " Expected: " + std::to_string(calChksum[ind]) + " Actual: " + std::to_string(fwChksumData[ind]);
+               std::string logMsg = "Checksum Failed! Offset: " +
+                         std::to_string(offset) +
+                         " Expected: " + std::to_string(calChksum[ind]) +
+                         " Actual: " + std::to_string(fwChksumData[ind]);
                phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
                return -1;
            }
@@ -433,7 +444,7 @@ int biosVerifyImage(const char *imagePath, uint8_t slotId, uint8_t target)
        offset += biosVerifyPktSize;
     }
     phosphor::logging::log<phosphor::logging::level::ERR>(
-    "Bios image verification done..");
+    "Bios image verification Successful..");
     file.close();
     return 0;
 }
@@ -513,7 +524,8 @@ int updateFirmwareTarget(uint8_t slotId, const char *imagePath, uint8_t target)
         int ret = sendFirmwareUpdateData(slotId, fileData, offset, target);
         if (ret != 0)
         {
-            std::string logMsg = "Firmware update Failed at offset: " + std::to_string(offset);
+            std::string logMsg = "Firmware update Failed at offset: " +
+                       std::to_string(offset);
             phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
             return -1;
         }
@@ -565,11 +577,13 @@ int cpldUpdateFw(uint8_t slotId, const char *imagePath)
     int ret = updateFirmwareTarget(slotId, imagePath, update_cpld);
     if (ret != 0)
     {
-        std::string logMsg = "CPLD update failed for slot#" + std::to_string(slotId);
+        std::string logMsg = "CPLD update failed for slot#" +
+                             std::to_string(slotId);
         phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
         return -1;
     }
-    std::string logMsg = "CPLD update completed successfully for slot#" + std::to_string(slotId);
+    std::string logMsg = "CPLD update completed successfully for slot#" +
+                         std::to_string(slotId);
     phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
     return 0;
 }
@@ -580,11 +594,13 @@ int hostBiosUpdateFw(uint8_t slotId, const char *imagePath)
     int ret = updateFirmwareTarget(slotId, imagePath, update_bios);
     if (ret != 0)
     {
-        std::string logMsg = "BIOS update failed for slot#" + std::to_string(slotId);
+        std::string logMsg = "BIOS update failed for slot#" +
+                             std::to_string(slotId);
         phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
         return -1;
     }
-    std::string logMsg = "BIOS update completed successfully for slot#" + std::to_string(slotId);
+    std::string logMsg = "BIOS update completed successfully for slot#" +
+                         std::to_string(slotId);
     phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
     return 0;
 }
@@ -594,40 +610,45 @@ int updateFw(char *argv[], uint8_t slotId)
 {
     const char *binFile = argv[1];
     // Check for the FW udpate
-    if (strcmp(argv[3], "--update") == 0)
+    if (strcmp(argv[3], "--update") != 0)
     {
-        if (strcmp(argv[4], "bios") == 0)
+        phosphor::logging::log<phosphor::logging::level::ERR>(
+        "Invalid Update command");
+        print_help();
+        return -1;
+    }
+
+    if (strcmp(argv[4], "bios") == 0)
+    {
+        int ret = hostBiosUpdateFw(slotId, binFile);
+        if (ret != 0)
         {
-            int ret = hostBiosUpdateFw(slotId, binFile);
-            if (ret != 0)
-            {
-                return -1;
-            }
-
-        } else if (strcmp(argv[4], "cpld") == 0) {
-            int ret = cpldUpdateFw(slotId, binFile);
-            if (ret != 0)
-            {
-                return -1;
-            }
-
-        } else {
-            phosphor::logging::log<phosphor::logging::level::ERR>(
-            "Invalid Update command");
-            print_help();
             return -1;
         }
+
+    } else if (strcmp(argv[4], "cpld") == 0) {
+        int ret = cpldUpdateFw(slotId, binFile);
+        if (ret != 0)
+        {
+            return -1;
+        }
+
+    } else {
+        phosphor::logging::log<phosphor::logging::level::ERR>(
+        "Invalid Update command");
+        print_help();
+        return -1;
     }
+
     return 0;
 }
 
-}// namespace
+}// namespace end
 
 int main(int argc, char *argv[])
 {
-    // command -> fb_yv2_misc binfile host1 --update bios/cpld
-
-    firmwareUpdate::conn = std::make_shared<sdbusplus::asio::connection>(firmwareUpdate::io);
+    firmwareUpdate::conn =
+        std::make_shared<sdbusplus::asio::connection>(firmwareUpdate::io);
     // Get the arguments
     uint8_t slotId;
 
@@ -655,7 +676,8 @@ int main(int argc, char *argv[])
         phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
         return -1;
     }
-    std::string logMsg = "FW update completed successfully for slot#" + std::to_string(slotId);
+    std::string logMsg = "FW update completed successfully for slot#" +
+                         std::to_string(slotId);
     phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
     return 0;
 }

@@ -15,16 +15,15 @@
 */
 
 #include <sys/sysinfo.h>
-#include <nlohmann/json.hpp>
 #include <systemd/sd-journal.h>
 #include <phosphor-logging/log.hpp>
 #include <boost/asio/io_service.hpp>
 #include <boost/asio/steady_timer.hpp>
-#include <boost/container/flat_map.hpp>
-#include <boost/container/flat_set.hpp>
-#include <sdbusplus/asio/object_server.hpp>
-#include <boost/asio/posix/stream_descriptor.hpp>
-#include <gpiod.hpp>
+//#include <boost/container/flat_map.hpp>
+//#include <boost/container/flat_set.hpp>
+//#include <sdbusplus/asio/object_server.hpp>
+//#include <boost/asio/posix/stream_descriptor.hpp>
+//#include <gpiod.hpp>
 
 #include <vector>
 #include <fstream>

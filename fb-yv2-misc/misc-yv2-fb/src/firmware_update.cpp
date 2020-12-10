@@ -24,12 +24,14 @@
 #include <boost/container/flat_set.hpp>
 #include <sdbusplus/asio/object_server.hpp>
 #include <boost/asio/posix/stream_descriptor.hpp>
+#include <gpiod.hpp>
 
 #include <vector>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <stdlib.h>
+#include <string.h>
 
 namespace firmwareUpdate
 {
@@ -509,11 +511,17 @@ int updateFirmwareTarget(uint8_t slotId, const char *imagePath, uint8_t target)
 
         // count details
         uint32_t count = ipmbWriteMax;
+        uint8_t target_value = target;
 
-        if ((offset + ipmbWriteMax) >= (index * bios_64k_size))
+        if ((target == update_bios) && ((offset + ipmbWriteMax) >= (index * bios_64k_size)))
         {
             count = (index * bios_64k_size) - offset;
             index++;
+        }
+
+        if ((target != update_bios) && ((offset+count) >= fileSize))
+        {
+            target_value = target_value | 0x80;
         }
 
         // Read the data
@@ -521,7 +529,7 @@ int updateFirmwareTarget(uint8_t slotId, const char *imagePath, uint8_t target)
         file.read((char *)&fileData[0], ipmbWriteMax);
 
         // Send data
-        int ret = sendFirmwareUpdateData(slotId, fileData, offset, target);
+        int ret = sendFirmwareUpdateData(slotId, fileData, offset, target_value);
         if (ret != 0)
         {
             std::string logMsg = "Firmware update Failed at offset: " +
@@ -560,12 +568,11 @@ int updateFirmwareTarget(uint8_t slotId, const char *imagePath, uint8_t target)
             if (respData[4] == cpld_err_code) {
                 return -1;
             }
-
             respData[4] %= 101;
             if (respData[4] == 100)
                break;
 
-            sleep(0.1);
+            sleep(1);
         }
     }
     return 0;

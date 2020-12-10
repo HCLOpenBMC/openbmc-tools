@@ -6,7 +6,7 @@ After=ipmb.service
 [Service]
 Restart=always
 RestartSec=3
-ExecStart=/usr/bin/fb-yv2-misc
+ExecStart= echo nothing
 Type=dbus
 BusName=xyz.openbmc_project.Chassis.Event
 

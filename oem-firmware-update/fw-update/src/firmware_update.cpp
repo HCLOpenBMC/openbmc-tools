@@ -19,11 +19,7 @@
 #include <phosphor-logging/log.hpp>
 #include <boost/asio/io_service.hpp>
 #include <boost/asio/steady_timer.hpp>
-//#include <boost/container/flat_map.hpp>
-//#include <boost/container/flat_set.hpp>
-//#include <sdbusplus/asio/object_server.hpp>
-//#include <boost/asio/posix/stream_descriptor.hpp>
-//#include <gpiod.hpp>
+#include <sdbusplus/asio/object_server.hpp>
 
 #include <vector>
 #include <fstream>
@@ -81,9 +77,9 @@ static constexpr uint8_t ipmb_write_128b = 128;
 
 // Host Numbers
 static constexpr uint8_t host1 = 0;
-static constexpr uint8_t host2 = 1;
-static constexpr uint8_t host3 = 2;
-static constexpr uint8_t host4 = 3;
+static constexpr uint8_t host2 = 4;
+static constexpr uint8_t host3 = 8;
+static constexpr uint8_t host4 = 12;
 
 static constexpr uint8_t update_bios= 0;
 static constexpr uint8_t update_cpld= 1;
@@ -344,38 +340,6 @@ int meRecovery(uint8_t slotId, uint8_t mode)
 }
 
 
-int getCpldUpdateProgress(uint8_t slotId, std::vector<uint8_t> &respData)
-{
-    // Variable declarations
-    std::vector<uint8_t> cmdData{iana_id_0, iana_id_1, iana_id_2};
-    int ret;
-    int retries = 0;
-
-    while (retries > max_retry)
-    {
-        ret = sendIPMBRequest(slotId, net_fn, get_cpld_update_progress,
-                              cmdData, respData);
-        if (ret)
-        {
-            std::string logMsg = "getCpldUpdateProgress: slot: " +
-                std::to_string(slotId) + ", retrying..";
-            phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
-            retries++;
-        } else {
-            break;
-        }
-    }
-
-    if (retries == max_retry)
-    {
-        phosphor::logging::log<phosphor::logging::level::ERR>(
-        "Failed to set response.. \n");
-        return -1;
-    }
-    return 0;
-}
-
-
 int biosVerifyImage(const char *imagePath, uint8_t slotId, uint8_t target)
 {
     // Check for bios image
@@ -552,28 +516,6 @@ int updateFirmwareTarget(uint8_t slotId, const char *imagePath, uint8_t target)
         }
     }
 
-    if (target == update_cpld)
-    {
-        std::vector<uint8_t> respData;
-
-        for (int i = 0; i < 60; i++)
-        {
-            // wait 60s at most
-            int ret = getCpldUpdateProgress(slotId, respData);
-            if (ret) {
-                return -1;
-            }
-
-            if (respData[4] == cpld_err_code) {
-                return -1;
-            }
-            respData[4] %= 101;
-            if (respData[4] == 100)
-               break;
-
-            sleep(1);
-        }
-    }
     return 0;
 }
 

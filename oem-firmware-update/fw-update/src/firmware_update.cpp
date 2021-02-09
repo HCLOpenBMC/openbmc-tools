@@ -20,19 +20,25 @@
 #include <boost/asio/io_service.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <sdbusplus/asio/object_server.hpp>
+#include <gpiod.hpp>
 
+#include <linux/i2c.h>
+#include <linux/i2c-dev.h>
+#include <sys/ioctl.h>
 #include <vector>
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 namespace firmwareUpdate
 {
 
 // Max retry limit
 static constexpr uint8_t max_retry = 3;
+static constexpr uint8_t bic_max_retry = 12;
 
 // IANA ID
 static constexpr uint8_t iana_id_0 = 0x15;
@@ -60,6 +66,22 @@ static constexpr uint8_t me_recv_id = 0x2;
 static constexpr uint8_t get_fw_chksum_id = 0xA;
 static constexpr uint8_t firmware_update_id = 0x9;
 static constexpr uint8_t get_cpld_update_progress = 0x1A;
+static constexpr uint8_t en_bridgeic_update_flag = 0xC;
+static constexpr uint8_t bic_cmd_download = 0x21;
+static constexpr uint8_t bic_cmd_run = 0x22;
+static constexpr uint8_t bic_cmd_status = 0x23;
+static constexpr uint8_t bic_cmd_data = 0x24;
+
+// BIC commands
+static constexpr uint8_t gpio_low = 0x0;
+static constexpr uint16_t i2c_slave = 0x0703;
+static constexpr uint16_t i2c_func = 0x0705;
+static constexpr uint8_t bridge_slave_address = 0x20;
+static constexpr uint8_t cmd_download_size = 0xB;
+static constexpr uint8_t cmd_run_size = 0x7;
+static constexpr uint8_t cmd_status_size = 0x3;
+static constexpr uint32_t bic_flash_start = 0x8000;
+static constexpr uint8_t bic_pkt_max = 252;
 
 // Error Codes
 static constexpr uint8_t write_flash_err   = 0x80;
@@ -516,6 +538,479 @@ int updateFirmwareTarget(uint8_t slotId, const char *imagePath, uint8_t target)
         }
     }
 
+    return 0;
+}
+
+
+int getGpioValue(uint8_t slotId)
+{
+    // GPIO status
+    std::string name;
+    gpiod::line gpioLine;
+
+    // Get the gpio name
+    if (slotId == host1) {
+        name = "I2C_SLOT1";
+    } else if (slotId == host2) {
+        name = "I2C_SLOT2";
+    } else if (slotId == host3) {
+        name = "I2C_SLOT3";
+    } else if (slotId == host4) {
+        name = "I2C_SLOT4";
+    } else {
+        phosphor::logging::log<phosphor::logging::level::ERR>("SlotId not valid");
+        return -1;
+    }
+
+    // Find the GPIO line
+    gpioLine = gpiod::find_line(name);
+    if (!gpioLine)
+    {
+        std::string logMsg = "Failed to find the " + name + " line";
+        phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
+        return -1;
+    }
+
+    try
+    {
+        gpioLine.request(
+            {"fwUpdate", gpiod::line_request::EVENT_BOTH_EDGES});
+    }
+    catch (std::exception&)
+    {
+        std::string logMsg = "Failed to request events for " + name;
+        phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
+        return -1;
+    }
+
+    int gpio_data = gpioLine.get_value();
+    std::string logMsg = "GPIO value: " + std::to_string(gpio_data);
+    phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+    if (gpio_data == gpio_low)
+    {
+        return 1;
+    } else {
+	    return 0;
+	}
+}
+
+
+static int i2cOpenBus(uint8_t slotId)
+{
+    uint8_t busId;
+    char busCharDev[16];
+    // Get the I2C bus number
+    if (slotId == host1) {
+        busId = 1;
+    } else if (slotId == host2) {
+        busId = 3;
+    } else if (slotId == host3) {
+        busId = 5;
+    } else if (slotId == host4) {
+        busId = 7;
+    } else {
+        busId = -1;
+    }
+
+    std::snprintf(busCharDev, sizeof(busCharDev) - 1, "/dev/i2c-%d", busId);
+    int busFd = open(busCharDev, O_RDWR);
+    if (busFd < 0)
+    {
+        std::string logMsg = "Failed to open i2c device: /dev/i2c-" + std::to_string(busId);
+        phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
+        return -1;
+    }
+
+    int rc = ioctl(busFd, i2c_slave, bridge_slave_address);
+    if (rc < 0) {
+        std::string logMsg = "Failed to open slave @ address: " + std::to_string(bridge_slave_address);
+        phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
+        close(busFd);
+    }
+
+    return busFd;
+}
+
+
+static int i2cIOFun(int fd, uint8_t *tbuf, uint8_t tcount, uint8_t *rbuf, uint8_t rcount) {
+    struct i2c_rdwr_ioctl_data data;
+    struct i2c_msg msg[2];
+    int n_msg = 0;
+    int rc;
+
+    if (tcount) {
+        msg[n_msg].addr = bridge_slave_address;
+        msg[n_msg].flags = 0;
+        msg[n_msg].len = tcount;
+        msg[n_msg].buf = tbuf;
+        n_msg++;
+    }
+
+    if (rcount) {
+        msg[n_msg].addr = bridge_slave_address;
+        msg[n_msg].flags = I2C_M_RD;
+        msg[n_msg].len = rcount;
+        msg[n_msg].buf = rbuf;
+        n_msg++;
+    }
+
+    data.msgs = msg;
+    data.nmsgs = n_msg;
+
+    rc = ioctl(fd, I2C_RDWR, &data);
+    if (rc < 0) {
+        std::string logMsg = "Failed to do Raw IO operation";
+        phosphor::logging::log<phosphor::logging::level::ERR>(logMsg.c_str());
+        return -1;
+    }
+  return 0;
+}
+
+
+int bicUpdateFw(uint8_t slotId, const char *imagePath)
+{
+    // Variable Declartion
+    uint32_t offset = 0x0;
+    int i = 0; 
+
+    // Open the file
+    std::streampos fileSize;
+    std::ifstream file(imagePath,
+                       std::ios::in | std::ios::binary | std::ios::ate);
+
+    if (!file.is_open())
+    {
+        std::string logMsg = "Unable to open file";
+        phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+    }
+
+    // Get its size
+    fileSize = file.tellg();
+    std::string logMsg = "Bin File Size: " + std::to_string(fileSize);
+    phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+
+    // Check whether the image is valid
+    if (fileSize <= 0)
+    {
+    	std::string logMsg = "Invalid Bin File";
+    	phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+        return -1;
+    } else {
+    	std::string logMsg = "Valid Bin File";
+    	phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+    }
+    file.seekg(0, std::ios::beg);
+    std::string logMsg1 = "Firmware write started";
+    phosphor::logging::log<phosphor::logging::level::INFO>(logMsg1.c_str());
+
+    // Enable Bridge-IC I2C update flag
+    std::vector<uint8_t> cmdData{iana_id_0,
+                                 iana_id_1,
+                                 iana_id_2,
+                                 0x1};
+    std::vector<uint8_t> respData;
+    int retries = max_retry;
+
+    std::string logMsg2 = "Enable Bridge-IC I2C update flag";
+    phosphor::logging::log<phosphor::logging::level::INFO>(logMsg2.c_str());
+    while (retries != 0)
+    {
+        int ret = sendIPMBRequest(slotId, net_fn, en_bridgeic_update_flag, cmdData, respData);
+        if (ret)
+        {
+            return -1;
+        }
+        // Check the completion code and the IANA_ID (0x15) for success
+        if ((respData[0] == 0) && (respData[1] == iana_id_0)){
+            break;
+        } else {
+            phosphor::logging::log<phosphor::logging::level::ERR>(
+            "Bridge-IC update flag is not enabled!! Retrying..");
+        }
+    }
+
+    // Stop the IPMB services
+    char cmd_data[50];
+    strcpy(cmd_data, "systemctl stop ipmb.service");
+    // call the above fun
+    system(cmd_data);
+
+	// Delay
+	sleep(2);
+
+    // Open I2C driver
+    int ifd = i2cOpenBus(slotId);
+	if (ifd < 0) {
+        return -1;
+    }
+
+    // Check whether BIC is ready
+    for (i = 0; i < bic_max_retry; i++)
+    {
+        if (getGpioValue(slotId) == 0)
+        {
+            std::string logMsg = "BIC ready for update after " +
+                std::to_string(i) + " tries";
+            phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+            break;
+        }
+		// Delay
+		sleep(1);
+    }
+
+    if (i == bic_max_retry)
+    {
+        std::string logMsg = "BIC is NOT ready for update";
+    	phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+
+        close(ifd);
+        return -1;
+    }
+
+	// General Declarations
+	uint8_t tbuf[256] = {0};
+	uint8_t rbuf[16] = {0};
+    uint8_t xbuf[256] = {0};
+	int rc;
+    int tcount;
+    int rcount;
+    int xcount;
+    uint32_t last_offset = 0;
+    uint32_t size = fileSize;
+
+    // Start Bridge IC update(0x21)
+	tbuf[0] = cmd_download_size;
+    tbuf[1] = 0x00; //Checksum, will fill later
+    tbuf[2] = bic_cmd_download;
+    // update flash address: 0x8000
+    tbuf[3] = (bic_flash_start >> 24) & 0xff;
+    tbuf[4] = (bic_flash_start >> 16) & 0xff;
+    tbuf[5] = (bic_flash_start >> 8) & 0xff;
+    tbuf[6] = (bic_flash_start) & 0xff;
+
+    // image size
+    tbuf[7] = (size >> 24) & 0xff;
+    tbuf[8] = (size >> 16) & 0xff;
+    tbuf[9] = (size >> 8) & 0xff;
+    tbuf[10] = (size) & 0xff;
+
+    // calcualte checksum for data portion
+    for (i = 2; i < cmd_download_size; i++) {
+        tbuf[1] += tbuf[i];
+    }
+    tcount = cmd_download_size;
+    rcount = 0;
+
+	rc = i2cIOFun(ifd, tbuf, tcount, rbuf, rcount);
+	if (rc) {
+        std::string logMsg = "i2cIOFun failed download ack";
+    	phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+	  return -1; //goto error_exit;
+	}
+
+	//delay for download command process ---
+	sleep(1);
+
+	tcount = 0;
+	rcount = 2;
+	rbuf[0]=0;
+	rbuf[1]=0;
+	rc = i2cIOFun(ifd, tbuf, tcount, rbuf, rcount);
+	if (rc) {
+        std::string logMsg = "i2cIOFun failed download ack";
+    	phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+	    return -1;
+	}
+
+    if (rbuf[0] != 0x00 || rbuf[1] != 0xcc) {
+        std::string logMsg = "Response values: " + std::to_string(rbuf[0])
+            + " " + std::to_string(rbuf[1]);
+    	phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+		return -1;
+	}
+
+	// Loop to send all the image data
+	uint32_t count = 252;
+    while (offset < fileSize)
+	{
+	    tbuf[0] = cmd_status_size;
+	    tbuf[1] = bic_cmd_status;
+	    tbuf[2] = bic_cmd_status;
+
+        tcount = cmd_status_size;
+        rcount = 0;
+
+        rc = i2cIOFun(ifd, tbuf, tcount, rbuf, rcount);
+        if (rc) {
+            std::string logMsg = "i2cIOFun failed to get status";
+    	    phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+            return -1;
+        }
+	    // Delay
+	    usleep(500);
+
+        tcount = 0;
+        rcount = 5;
+
+	    memset(rbuf, 0, sizeof(rbuf));
+        rc = i2cIOFun(ifd, tbuf, tcount, rbuf, rcount);
+        if (rc) {
+            std::string logMsg = "i2cIOFun failed to get status Ack";
+    	    phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+            return -1;
+        }
+
+        if (rbuf[0] != 0x00 ||
+            rbuf[1] != 0xcc ||
+            rbuf[2] != 0x03 ||
+            rbuf[3] != 0x40 ||
+            rbuf[4] != 0x40) {
+            std::string logMsg = "Response values: " + std::to_string(rbuf[0])
+                + " " + std::to_string(rbuf[1]) +  " " + std::to_string(rbuf[2])
+                + " " + std::to_string(rbuf[3]) +  " " + std::to_string(rbuf[4]);
+    	    phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+            return -1;
+        }
+
+        // Send ACK ---
+	    tbuf[0] = 0xcc;
+        tcount = 1;
+        rcount = 0;
+        rc = i2cIOFun(ifd, tbuf, tcount, rbuf, rcount);
+        if (rc) {
+            std::string logMsg = "i2cIOFun failed to send ACK";
+    	    phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+            return -1;
+        }
+
+		if ((offset+count) >= fileSize)
+		{
+			count = size - offset;
+		}
+
+		// Read the data
+		uint8_t fileData[count];
+		file.read((char *)&fileData[0], count);
+
+		tbuf[0] = count+3;
+		tbuf[1] = bic_cmd_data;
+		tbuf[2] = bic_cmd_data;
+
+		for (i=0 ; i < count; i++)
+		{
+			tbuf[3+i] = fileData[i];
+		    tbuf[1] += fileData[i];
+		}
+
+		tcount = tbuf[0];
+		rcount = 0;
+
+		rc = i2cIOFun(ifd, tbuf, tcount, rbuf, rcount);
+		if (rc) {
+            std::string logMsg = "i2cIOFun failed to send Bin data";
+    	    phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+		    return -1;
+		}
+
+		usleep(500);
+		tcount = 0;
+		rcount = 2;
+
+		memset(rbuf, 0, sizeof(rbuf));
+		rc = i2cIOFun(ifd, tbuf, tcount, rbuf, rcount);
+		if (rc) {
+            std::string logMsg = "i2cIOFun failed to get Bin data ack";
+    	    phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+		    return -1;
+		}
+
+		if (rbuf[0] != 0x00 || rbuf[1] != 0xcc) {
+            std::string logMsg = "Response values: " + std::to_string(rbuf[0])
+                + " " + std::to_string(rbuf[1]);
+    	    phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+		    return -1;
+		}
+		offset += count;
+    }
+
+	// Run the new image
+	tbuf[0] = cmd_run_size;
+	tbuf[1] = 0x0;
+	tbuf[2] = bic_cmd_run;
+	tbuf[3] = (bic_flash_start >> 24) & 0xff;
+	tbuf[4] = (bic_flash_start >> 16) & 0xff;
+	tbuf[5] = (bic_flash_start >> 8) & 0xff;
+	tbuf[6] = (bic_flash_start) & 0xff;
+
+	for (i = 2; i < cmd_run_size; i++) {
+	  tbuf[1] += tbuf[i];
+	}
+
+	tcount = cmd_run_size;
+	rcount = 0;
+
+	rc = i2cIOFun(ifd, tbuf, tcount, rbuf, rcount);
+	if (rc) {
+        std::string logMsg = "i2cIOFun failed to run new image";
+    	phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+		return -1;
+	}
+
+	// Delay
+	usleep(500);
+
+	tcount = 0;
+	rcount = 2;
+
+	memset(rbuf, 0, sizeof(rbuf));
+	rc = i2cIOFun(ifd, tbuf, tcount, rbuf, rcount);
+	if (rc) {
+        std::string logMsg = "i2cIOFun failed to get run new image Ack";
+    	phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+		return -1;
+	}
+
+	if (rbuf[0] != 0x00 || rbuf[1] != 0xcc) {
+        std::string logMsg = "Response values: " + std::to_string(rbuf[0])
+            + " " + std::to_string(rbuf[1]);
+        phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+	    return -1;
+	}
+
+	sleep(2);
+    // Check whether BIC is ready
+    for (i = 0; i < bic_max_retry; i++)
+    {
+        if (getGpioValue(slotId) == 0)
+        {
+            std::string logMsg = "BIC ready for update after " +
+                std::to_string(i) + " tries";
+            phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+            break;
+        }
+    }
+
+    if (i == bic_max_retry)
+    {
+        std::string logMsg = "BIC is NOT ready for update";
+        phosphor::logging::log<phosphor::logging::level::INFO>(logMsg.c_str());
+
+        close(ifd);
+        return -1;
+    }
+
+	// Restart ipmbd daemon
+    char cmd_data_1[50];
+    strcpy(cmd_data_1, "systemctl start ipmb.service");
+    // call the above fun
+    system(cmd_data_1);
+
+	if (ifd > 0) {
+	   close(ifd);
+	}
+
+    std::string logMsg3 = "BIC FW update completed!!";
+    phosphor::logging::log<phosphor::logging::level::INFO>(logMsg3.c_str());
     return 0;
 }
 

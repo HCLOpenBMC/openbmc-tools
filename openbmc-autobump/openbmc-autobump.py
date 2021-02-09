@@ -91,7 +91,10 @@ def find_candidate_recipes(meta, args):
         log('{}'.format(e), args)
         return []
 
-    grep_args = ['-l', '-e', '_URI', '--and', '-e', 'github.com/openbmc']
+    match_suffixes = ('bb', 'bbclass', 'inc')
+    pathspecs = ('*.{}'.format(x) for x in match_suffixes)
+    grep_args = ('-l', '-e', '_URI', '--and', '-e', 'github.com/openbmc')
+    grep_args = (*grep_args, *pathspecs)
     try:
         return git.grep(*grep_args, _cwd=meta).stdout.decode('utf-8').split()
     except sh.ErrorReturnCode_1:
@@ -174,7 +177,10 @@ def find_and_process_bumps(meta, args):
 
         git.commit(sh.echo(commit_msg), '-s', '-F', '-', _cwd=meta)
 
-        push_args = ['origin', 'HEAD:refs/for/{}/autobump'.format(args.branch)]
+        push_args = [
+            'origin',
+            'HEAD:refs/for/{}%topic=autobump'.format(args.branch)
+        ]
         if not args.dry_run:
             git.push(*push_args, _cwd=meta)
 
